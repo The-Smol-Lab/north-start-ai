@@ -2,7 +2,7 @@
 
 LangGraph-powered, bilingual Streamlit app that interviews users about their retirement goals, infers investment style, and visualizes readiness with actionable suggestions.
 
-<img width="2752" height="1536" alt="image" src="[https://github.com/user-attachments/assets/3bb1ffa7-889e-4969-8f34-3ee30443a064](https://github.com/user-attachments/assets/3bb1ffa7-889e-4969-8f34-3ee30443a064)" />
+<img width="2752" height="1536" alt="unnamed (1)" src="https://github.com/user-attachments/assets/64f1ecf1-5a7d-4868-be8d-571e54cca40e" />
 
 ### 🚀 Performance & Scalability (Cloud Optimized)
 
