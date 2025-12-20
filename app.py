@@ -372,8 +372,14 @@ def build_interview_graph():
     workflow.add_edge("interviewer", END)
     return workflow.compile()
 
+@st.cache_resource(show_spinner=False)
+def get_compiled_interview_graph():
+    """Cache the compiled LangGraph workflow."""
+    return build_interview_graph()
+
 # --- 4. VISUALIZATION LOGIC ---
 
+@st.cache_data(show_spinner=False)
 def calculate_projection(age, retire_age, current, monthly, rate, inflation, growth, currency):
     data = []
     balance = current
@@ -400,6 +406,7 @@ def calculate_projection(age, retire_age, current, monthly, rate, inflation, gro
         
     return pd.DataFrame(data)
 
+@st.cache_data(show_spinner=False)
 def create_chart(df, target_monthly, currency):
     symbol = CURRENCY_CONFIG[currency]["symbol"]
     target_pv = (target_monthly * 12) / 0.04 
@@ -432,6 +439,7 @@ def create_chart(df, target_monthly, currency):
     
     return fig
 
+@st.cache_data(show_spinner=False)
 def create_gauge(score, t):
     color = "red" if score < 50 else "#FFC107" if score < 80 else "#00CC96"
     
@@ -574,6 +582,7 @@ def clean_markdown_table(text: str) -> str:
 
     return text
 
+@st.cache_data(show_spinner=False, ttl=300)
 def generate_html_report(profile, assumptions, safe_income, target_expense, food_price, score, advice_history, fig, lang, currency):
     t = TRANS[lang]
     conf = CURRENCY_CONFIG[currency]
@@ -848,65 +857,171 @@ if not os.environ.get("OPENROUTER_API_KEY"):
 
 curr_conf = CURRENCY_CONFIG[st.session_state["current_currency"]]
 
-if not st.session_state["onboarding_complete"]:
-    col_c1, col_c2 = st.columns([2, 1])
+# --- ONBOARDING CHAT FRAGMENT ---
+@st.fragment
+def onboarding_chat_interface():
+    """Fragment for onboarding chat - prevents full page reruns during conversation."""
+    lang = st.session_state["current_lang"]
+    currency = st.session_state["current_currency"]
+    t = TRANS[lang]
     
-    with col_c1:
-        st.title(t["title"])
+    st.title(t["title"])
+    
+    if not st.session_state["messages"]:
+        st.session_state["messages"].append(AIMessage(content=t["chat_welcome"]))
+    
+    for msg in st.session_state["messages"]:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        with st.chat_message(role):
+            st.write(msg.content)
+            
+    if prompt := st.chat_input(t["chat_placeholder"]):
+        st.session_state["messages"].append(HumanMessage(content=prompt))
+        with st.chat_message("user"): st.write(prompt)
         
-        if not st.session_state["messages"]:
-            st.session_state["messages"].append(AIMessage(content=t["chat_welcome"]))
+        state_inputs = {
+            "messages": st.session_state["messages"], 
+            "profile": st.session_state["user_profile"],
+            "language": lang,
+            "currency": currency,
+            "is_complete": False
+        }
         
-        for msg in st.session_state["messages"]:
+        result = extraction_node(state_inputs)
+        st.session_state["user_profile"] = result.get("profile", st.session_state["user_profile"])
+        if result.get("is_complete"):
+            st.session_state["onboarding_complete"] = True
+            st.rerun()
+
+        llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get("OPENROUTER_API_KEY"),
+            model="x-ai/grok-4.1-fast",
+            temperature=0.7,
+            streaming=True
+        )
+        prompt_text = build_interviewer_prompt(st.session_state["user_profile"], lang, currency)
+
+        assistant_container = st.chat_message("assistant")
+        stream_placeholder = assistant_container.empty()
+
+        async def _run_stream():
+            return await stream_chat_response(
+                llm,
+                [SystemMessage(content=prompt_text)] + st.session_state["messages"],
+                on_token=lambda _delta, full: stream_placeholder.write(full),
+            )
+
+        content = asyncio.run(_run_stream())
+
+        if "CALCULATION_READY" in content:
+            st.session_state["onboarding_complete"] = True
+            st.rerun()
+
+        st.session_state["messages"].append(AIMessage(content=content))
+        st.rerun()
+
+
+# --- ADVICE CHAT FRAGMENT ---
+@st.fragment
+def advice_chat_interface(age, retire_age, curr_sav, month_sav, target_expense, inv_style, gap, score):
+    """Fragment for advice chat - prevents dashboard reruns during conversation."""
+    t = TRANS[st.session_state["current_lang"]]
+    
+    st.markdown("---")
+    st.markdown(f"### {t['advice_header']}")
+    
+    advice_container = st.container()
+    
+    with advice_container:
+        for msg in st.session_state["advice_messages"]:
             role = "user" if isinstance(msg, HumanMessage) else "assistant"
             with st.chat_message(role):
                 st.write(msg.content)
                 
-        if prompt := st.chat_input(t["chat_placeholder"]):
-            st.session_state["messages"].append(HumanMessage(content=prompt))
-            with st.chat_message("user"): st.write(prompt)
-            
-            state_inputs = {
-                "messages": st.session_state["messages"], 
-                "profile": st.session_state["user_profile"],
-                "language": lang,
-                "currency": currency,
-                "is_complete": False
-            }
-            
-            result = extraction_node(state_inputs)
-            st.session_state["user_profile"] = result.get("profile", st.session_state["user_profile"])
-            if result.get("is_complete"):
-                st.session_state["onboarding_complete"] = True
-                st.rerun()
+    if advice_input := st.chat_input(t["advice_placeholder"]):
+        st.session_state["advice_messages"].append(HumanMessage(content=advice_input))
+        with st.chat_message("user"):
+            st.write(advice_input)
+        
+        current_stats = {
+            "age": age, 
+            "retirement_age": retire_age,
+            "current_savings": curr_sav, 
+            "monthly_savings": month_sav, 
+            "target_monthly_expense": target_expense,
+            "investment_style": inv_style,
+            "monthly_shortfall_gap": gap,
+            "readiness_score": score
+        }
 
-            llm = ChatOpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=os.environ.get("OPENROUTER_API_KEY"),
-                model="x-ai/grok-4.1-fast",
-                temperature=0.7,
-                streaming=True
+        assistant_container = st.chat_message("assistant")
+        stream_placeholder = assistant_container.empty()
+
+        async def _stream_advice():
+            return await stream_advice(
+                current_stats,
+                st.session_state["advice_messages"],
+                st.session_state["current_lang"],
+                st.session_state["current_currency"],
+                on_token=lambda _delta, full: stream_placeholder.write(full),
             )
-            prompt_text = build_interviewer_prompt(st.session_state["user_profile"], lang, currency)
 
-            assistant_container = st.chat_message("assistant")
-            stream_placeholder = assistant_container.empty()
+        response_text = asyncio.run(_stream_advice())
 
-            async def _run_stream():
-                return await stream_chat_response(
-                    llm,
-                    [SystemMessage(content=prompt_text)] + st.session_state["messages"],
-                    on_token=lambda _delta, full: stream_placeholder.write(full),
-                )
+        st.session_state["advice_messages"].append(AIMessage(content=response_text))
+        stream_placeholder.write(response_text)
 
-            content = asyncio.run(_run_stream())
 
-            if "CALCULATION_READY" in content:
-                st.session_state["onboarding_complete"] = True
-                st.rerun()
+# --- DASHBOARD SIMULATION FRAGMENT ---
+@st.fragment
+def simulation_controls(def_age, def_retire, def_curr, def_month, def_target, inferred_rate, defaults, sym, t, curr_conf):
+    """Fragment for simulation controls - allows instant slider updates without full rerun."""
+    age = st.number_input(t["age"], 20, 90, def_age, key="sim_age")
+    retire_age = st.number_input(t["retire_age"], age+1, 100, def_retire, key="sim_retire")
+    
+    money_step = 1000.0 if st.session_state["current_currency"] == "THB" else 100.0
+    
+    curr_sav = st.number_input(f"{t['curr_sav']} ({sym})", 0.0, None, def_curr, step=money_step*10, key="sim_curr_sav")
+    month_sav = st.number_input(f"{t['month_sav']} ({sym})", 0.0, None, def_month, step=money_step, key="sim_month_sav")
+    
+    with st.expander(t["fine_tune"], expanded=True):
+        rc1, rc2, rc3 = st.columns(3)
+        
+        rates_map = curr_conf["rates"]
+        asset_options = list(rates_map.keys())
+        
+        default_idx = 0
+        if inferred_rate:
+            closest_asset = min(rates_map.items(), key=lambda x: abs(x[1] - inferred_rate))
+            if closest_asset[0] in asset_options:
+                 default_idx = asset_options.index(closest_asset[0])
+        
+        selected_asset = rc1.selectbox(
+            t["sel_asset"],
+            options=asset_options,
+            index=default_idx,
+            key="sim_asset"
+        )
+        
+        suggested_rate_val = rates_map[selected_asset]
+        
+        rate = rc1.slider(t["return_rate"], 1.0, 20.0, float(suggested_rate_val), key="sim_rate")
+        
+        rc1.caption(f"Benchmark: {selected_asset} (~{suggested_rate_val}%)")
+        
+        inflation = rc2.slider(t["inflation"], 0.0, 10.0, float(defaults["inflation_rate"]), key="sim_inflation")
+        growth = rc3.slider(t["growth"], 0.0, 20.0, 3.0, key="sim_growth")
+        target_expense = st.number_input(f"{t['expense']} ({sym})", 0.0, None, def_target, step=money_step, key="sim_target")
+    
+    return age, retire_age, curr_sav, month_sav, rate, inflation, growth, target_expense
 
-            st.session_state["messages"].append(AIMessage(content=content))
-            st.rerun()
+
+if not st.session_state["onboarding_complete"]:
+    col_c1, col_c2 = st.columns([2, 1])
+    
+    with col_c1:
+        onboarding_chat_interface()
 
     with col_c2:
         rates_d = curr_conf["rates"]
@@ -962,43 +1077,12 @@ else:
 
     st.markdown(f"## {t['calc_header']}")
     
-    with st.container():
-        c1, c2, c3, c4 = st.columns(4)
-        age = c1.number_input(t["age"], 20, 90, def_age)
-        retire_age = c2.number_input(t["retire_age"], age+1, 100, def_retire)
-        
-        money_step = 1000.0 if st.session_state["current_currency"] == "THB" else 100.0
-        
-        curr_sav = c3.number_input(f"{t['curr_sav']} ({sym})", 0.0, None, def_curr, step=money_step*10)
-        month_sav = c4.number_input(f"{t['month_sav']} ({sym})", 0.0, None, def_month, step=money_step)
-        
-        with st.expander(t["fine_tune"], expanded=True):
-            rc1, rc2, rc3 = st.columns(3)
-            
-            rates_map = curr_conf["rates"]
-            asset_options = list(rates_map.keys())
-            
-            default_idx = 0
-            if inferred_rate:
-                closest_asset = min(rates_map.items(), key=lambda x: abs(x[1] - inferred_rate))
-                if closest_asset[0] in asset_options:
-                     default_idx = asset_options.index(closest_asset[0])
-            
-            selected_asset = rc1.selectbox(
-                t["sel_asset"],
-                options=asset_options,
-                index=default_idx
-            )
-            
-            suggested_rate_val = rates_map[selected_asset]
-            
-            rate = rc1.slider(t["return_rate"], 1.0, 20.0, float(suggested_rate_val))
-            
-            rc1.caption(f"Benchmark: {selected_asset} (~{suggested_rate_val}%)")
-            
-            inflation = rc2.slider(t["inflation"], 0.0, 10.0, float(defaults["inflation_rate"]))
-            growth = rc3.slider(t["growth"], 0.0, 20.0, 3.0)
-            target_expense = st.number_input(f"{t['expense']} ({sym})", 0.0, None, def_target, step=money_step)
+    # Use fragment for controls to enable instant updates
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        age, retire_age, curr_sav, month_sav, rate, inflation, growth, target_expense = simulation_controls(
+            def_age, def_retire, def_curr, def_month, def_target, inferred_rate, defaults, sym, t, curr_conf
+        )
 
     df = calculate_projection(age, retire_age, curr_sav, month_sav, rate, inflation, growth, st.session_state["current_currency"])
     
@@ -1061,49 +1145,7 @@ else:
                 st.rerun()
 
     if st.session_state["show_advice"]:
-        st.markdown("---")
-        st.markdown(f"### {t['advice_header']}")
-        
-        advice_container = st.container()
-        
-        with advice_container:
-            for msg in st.session_state["advice_messages"]:
-                role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                with st.chat_message(role):
-                    st.write(msg.content)
-                    
-        if advice_input := st.chat_input(t["advice_placeholder"]):
-            st.session_state["advice_messages"].append(HumanMessage(content=advice_input))
-            with st.chat_message("user"):
-                st.write(advice_input)
-            
-            current_stats = {
-                "age": age, 
-                "retirement_age": retire_age,
-                "current_savings": curr_sav, 
-                "monthly_savings": month_sav, 
-                "target_monthly_expense": target_expense,
-                "investment_style": inv_style,
-                "monthly_shortfall_gap": gap,
-                "readiness_score": score
-            }
-
-            assistant_container = st.chat_message("assistant")
-            stream_placeholder = assistant_container.empty()
-
-            async def _stream_advice():
-                return await stream_advice(
-                    current_stats,
-                    st.session_state["advice_messages"],
-                    st.session_state["current_lang"],
-                    st.session_state["current_currency"],
-                    on_token=lambda _delta, full: stream_placeholder.write(full),
-                )
-
-            response_text = asyncio.run(_stream_advice())
-
-            st.session_state["advice_messages"].append(AIMessage(content=response_text))
-            stream_placeholder.write(response_text)
+        advice_chat_interface(age, retire_age, curr_sav, month_sav, target_expense, inv_style, gap, score)
 
     st.markdown("---")
     
