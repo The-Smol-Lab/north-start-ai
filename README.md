@@ -69,7 +69,3 @@ Open http://localhost:8501 to interact with the coach.
 * **Environment:** `OPENROUTER_API_KEY` is required. Optional: set `LANGCHAIN_TRACING_V2` and `LANGCHAIN_API_KEY` if you want LangSmith tracing.
 * **Models:** Interview uses `x-ai/grok-4.1-fast` for conversation and `mistralai/ministral-14b-2512` for structured extraction (both via OpenRouter).
 * **Secrets (Cloud):** If deploying to Streamlit Cloud, add `OPENROUTER_API_KEY` under **Advanced Settings > Secrets**.
-
----
-
-**Would you like me to also help you generate a `secrets.toml` example for your local `.streamlit/` folder to make testing easier?**
